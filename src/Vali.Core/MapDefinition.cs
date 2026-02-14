@@ -1,4 +1,4 @@
-﻿using System.Text.Json.Serialization;
+using System.Text.Json.Serialization;
 
 namespace Vali.Core;
 
@@ -27,6 +27,11 @@ public record MapDefinition
     public Dictionary<string, string> NamedExpressions { get; set; } = new();
     public string[] UsedLocationsPaths { get; set; } = [];
     public bool EnableDefaultLocationFilters { get; set; }
+    /// <summary>
+    /// When true, locations with a road/street name in Google panorama metadata are rejected.
+    /// Uses the same approach as VirtualStreets/various-map-generator (GetMetadata + road path).
+    /// </summary>
+    public bool RejectRoadName { get; set; }
     public LocationProbability GlobalLocationProbability { get; set; } = new();
     public Dictionary<string, LocationProbability> CountryLocationProbabilities { get; set; } = new();
     public Dictionary<string, Dictionary<string, LocationProbability>> SubdivisionLocationProbabilities { get; set; } = new();

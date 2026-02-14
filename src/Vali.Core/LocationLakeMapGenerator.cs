@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
 using Vali.Core.Google;
@@ -11,6 +11,11 @@ public class LocationLakeMapGenerator
     {
         var sw = Stopwatch.StartNew();
         var logger = ValiLogger.Factory.CreateLogger<LocationLakeMapGenerator>();
+        if (mapDefinition.RejectRoadName)
+        {
+            ConsoleLogger.Info("Rejecting locations with road names (Google metadata, same as Various Map Generator).");
+            GoogleApi.ResetRoadFilterStats();
+        }
         var subdivisionGroups = new List<(IList<Location> locations, int regionGoalCount, int minDistance)>();
         foreach (var countryCode in mapDefinition.CountryCodes)
         {
@@ -29,48 +34,48 @@ public class LocationLakeMapGenerator
             await DataDownloadService.EnsureFilesDownloaded(countryCode, subdivisionFiles);
             var locationCountGoal = CountryLocationCountGoal(mapDefinition, countryCode);
             var parallelism = ApplicationSettingsService.ReadApplicationSettings().Parallelism ?? 20;
-            var locationChunks = mapDefinition.DistributionStrategy.Key switch
+            (IList<Location> locations, int regionGoalCount, int minDistance)[] locationChunks;
+            var strategyKey = mapDefinition.DistributionStrategy.Key;
+            if (strategyKey == DistributionStrategies.FixedCountByMaxMinDistance && mapDefinition.DistributionStrategy.TreatCountriesAsSingleSubdivision.Contains(countryCode))
             {
-                DistributionStrategies.FixedCountByMaxMinDistance when mapDefinition.DistributionStrategy.TreatCountriesAsSingleSubdivision.Contains(countryCode) => DistributionStrategies.CountryByMaxMinDistance(
-                    countryCode,
-                    subdivisionFiles,
-                    locationCountGoal,
-                    mapDefinition),
-                DistributionStrategies.FixedCountByMaxMinDistance => (await subdivisionFiles.RunLimitedNumberAtATime(f =>
-                    DistributionStrategies.SubdivisionByMaxMinDistance(
-                        countryCode,
-                        f,
-                        locationCountGoal,
-                        subDivisions,
-                        mapDefinition), parallelism)).ToArray(),
-                DistributionStrategies.FixedCountByCoverageDensity when mapDefinition.DistributionStrategy.TreatCountriesAsSingleSubdivision.Contains(countryCode) => DistributionStrategies.CountryByCoverageDensity(
-                    countryCode,
-                    subdivisionFiles,
-                    locationCountGoal,
-                    mapDefinition),
-                DistributionStrategies.FixedCountByCoverageDensity => (await subdivisionFiles.RunLimitedNumberAtATime(f =>
-                    DistributionStrategies.SubdivisionByCoverageDensity(
-                        countryCode,
-                        f,
-                        locationCountGoal,
-                        subDivisions,
-                        mapDefinition), parallelism)).ToArray(),
-                DistributionStrategies.MaxCountByFixedMinDistance => DistributionStrategies.MaxLocationsInSubdivisionsByFixedMinDistance(
-                    countryCode,
-                    subdivisionFiles,
-                    subDivisions,
-                    mapDefinition),
-                DistributionStrategies.EvenlyByDistanceWithinCountry => DistributionStrategies.EvenlyByDistanceInCountry(
-                    countryCode,
-                    subdivisionFiles,
-                    subDivisions,
-                    mapDefinition),
-                _ => throw new ArgumentOutOfRangeException()
-            };
+                locationChunks = await DistributionStrategies.CountryByMaxMinDistance(countryCode, subdivisionFiles, locationCountGoal, mapDefinition);
+            }
+            else if (strategyKey == DistributionStrategies.FixedCountByMaxMinDistance)
+            {
+                locationChunks = (await subdivisionFiles.RunLimitedNumberAtATime(f =>
+                    DistributionStrategies.SubdivisionByMaxMinDistance(countryCode, f, locationCountGoal, subDivisions, mapDefinition), parallelism, null)).ToArray();
+            }
+            else if (strategyKey == DistributionStrategies.FixedCountByCoverageDensity && mapDefinition.DistributionStrategy.TreatCountriesAsSingleSubdivision.Contains(countryCode))
+            {
+                locationChunks = await DistributionStrategies.CountryByCoverageDensity(countryCode, subdivisionFiles, locationCountGoal, mapDefinition);
+            }
+            else if (strategyKey == DistributionStrategies.FixedCountByCoverageDensity)
+            {
+                locationChunks = (await subdivisionFiles.RunLimitedNumberAtATime(f =>
+                    DistributionStrategies.SubdivisionByCoverageDensity(countryCode, f, locationCountGoal, subDivisions, mapDefinition), parallelism, null)).ToArray();
+            }
+            else if (strategyKey == DistributionStrategies.MaxCountByFixedMinDistance)
+            {
+                locationChunks = await DistributionStrategies.MaxLocationsInSubdivisionsByFixedMinDistance(countryCode, subdivisionFiles, subDivisions, mapDefinition);
+            }
+            else if (strategyKey == DistributionStrategies.EvenlyByDistanceWithinCountry)
+            {
+                locationChunks = DistributionStrategies.EvenlyByDistanceInCountry(countryCode, subdivisionFiles, subDivisions, mapDefinition);
+            }
+            else
+            {
+                throw new ArgumentOutOfRangeException();
+            }
             subdivisionGroups.AddRange(locationChunks);
         }
 
         logger.MapGenerated(subdivisionGroups.Sum(s => s.locations.Count), sw.Elapsed);
+
+        if (mapDefinition.RejectRoadName)
+        {
+            var (accepted, rejectedRoad, rejectedError) = GoogleApi.GetRoadFilterStats();
+            ConsoleLogger.Info($"Road filter: {accepted} accepted (no road name), {rejectedRoad} rejected (had road name), {rejectedError} rejected (API/parse error).");
+        }
 
         if (subdivisionGroups.Any())
         {

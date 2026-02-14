@@ -175,6 +175,9 @@
     "enableDefaultLocationFilters": {
       "type": "boolean"
     },
+    "rejectRoadName": {
+      "type": "boolean"
+    },
     "globalLocationProbability": {
       "$ref": "#/definitions/LocationProbability"
     },

@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
@@ -14,11 +14,11 @@ public class GoogleApi
 
     static GoogleApi()
     {
-        _client = new HttpClient
+        _client = new HttpClient(new SocketsHttpHandler { UseCookies = false })
         {
             BaseAddress = new Uri("https://maps.googleapis.com")
         };
-        _shortenerClient = new HttpClient();
+        _shortenerClient = new HttpClient(new SocketsHttpHandler { UseCookies = false });
         _client.DefaultRequestHeaders.Add("x-user-agent", "grpc-web-javascript/0.1");
     }
 
@@ -498,6 +498,94 @@ public class GoogleApi
             _ => defaultDrivingDirectionAngle
         };
         return heading;
+    }
+
+    // Road filter stats for confirmation when RejectRoadName is used (thread-safe)
+    private static int _roadFilterAccepted;
+    private static int _roadFilterRejectedRoad;
+    private static int _roadFilterRejectedError;
+    private static int _roadFilterTotalCalls;
+
+    public static void ResetRoadFilterStats()
+    {
+        Interlocked.Exchange(ref _roadFilterAccepted, 0);
+        Interlocked.Exchange(ref _roadFilterRejectedRoad, 0);
+        Interlocked.Exchange(ref _roadFilterRejectedError, 0);
+        Interlocked.Exchange(ref _roadFilterTotalCalls, 0);
+    }
+
+    public static (int Accepted, int RejectedRoad, int RejectedError) GetRoadFilterStats() => (
+        Volatile.Read(ref _roadFilterAccepted),
+        Volatile.Read(ref _roadFilterRejectedRoad),
+        Volatile.Read(ref _roadFilterRejectedError));
+
+    /// <summary>
+    /// Returns true if the panorama has a road/street name in Google metadata.
+    /// Same as Various Map Generator: only meta[12][0][0][0][2][0] (pano.location.road).
+    /// On API error or unparseable response we return true (reject) so we only keep locations we successfully verified.
+    /// </summary>
+    public static async Task<bool> HasRoadName(string panoId)
+    {
+        if (string.IsNullOrWhiteSpace(panoId))
+        {
+            Interlocked.Increment(ref _roadFilterRejectedError);
+            var t = Interlocked.Increment(ref _roadFilterTotalCalls);
+            if (t % 100 == 0) Console.WriteLine($"  Road filter: {Volatile.Read(ref _roadFilterAccepted)} accepted, {Volatile.Read(ref _roadFilterRejectedRoad)} had road, {Volatile.Read(ref _roadFilterRejectedError)} error (so far).");
+            return true; // Can't verify; reject
+        }
+        var panoType = (panoId.StartsWith("CIHM", StringComparison.Ordinal) || panoId.Length != 22) ? 10 : 2;
+        var body = $"""[["apiv3",null,null,null,"US",null,null,null,null,null,[[0]]],["en","US"],[[[{panoType},"{panoId}"]]],[[1,2,3,4,8,6]]]""";
+        try
+        {
+            var response = await _client.PostAsync("$rpc/google.internal.maps.mapsjs.v1.MapsJsInternalService/GetMetadata", new StringContent(body, Encoding.UTF8, "application/json+protobuf"));
+            var content = await response.Content.ReadAsStringAsync();
+            var json = JsonNode.Parse(content);
+            if (json == null || json.AsArray().Count < 2)
+            {
+                Interlocked.Increment(ref _roadFilterRejectedError);
+                var t = Interlocked.Increment(ref _roadFilterTotalCalls);
+                if (t % 100 == 0) Console.WriteLine($"  Road filter: {Volatile.Read(ref _roadFilterAccepted)} accepted, {Volatile.Read(ref _roadFilterRejectedRoad)} had road, {Volatile.Read(ref _roadFilterRejectedError)} error (so far).");
+                return true; // Unparseable; reject so we don't keep unverified locations
+            }
+            var root = json[1]?[0];
+            if (root == null)
+            {
+                Interlocked.Increment(ref _roadFilterRejectedError);
+                var t = Interlocked.Increment(ref _roadFilterTotalCalls);
+                if (t % 100 == 0) Console.WriteLine($"  Road filter: {Volatile.Read(ref _roadFilterAccepted)} accepted, {Volatile.Read(ref _roadFilterRejectedRoad)} had road, {Volatile.Read(ref _roadFilterRejectedError)} error (so far).");
+                return true;
+            }
+
+            // Various Map Generator: if (settings.rejectRoadName && pano.location.road) return false
+            // road = meta[12][0][0][0][2][0]
+            var meta = root[5]?[0];
+            var roadNode = meta?[12]?[0]?[0]?[0]?[2]?[0];
+            var road = roadNode?.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(road) && roadNode != null)
+            {
+                // Some responses may wrap the string in an array or different shape
+                var s = roadNode.ToString();
+                if (!string.IsNullOrWhiteSpace(s) && s.Length < 500 && !s.StartsWith('['))
+                    road = s.Trim().Trim('"');
+            }
+            var hasRoad = !string.IsNullOrWhiteSpace(road);
+            if (hasRoad)
+                Interlocked.Increment(ref _roadFilterRejectedRoad);
+            else
+                Interlocked.Increment(ref _roadFilterAccepted);
+            var total = Interlocked.Increment(ref _roadFilterTotalCalls);
+            if (total % 100 == 0)
+                Console.WriteLine($"  Road filter: {Volatile.Read(ref _roadFilterAccepted)} accepted, {Volatile.Read(ref _roadFilterRejectedRoad)} had road, {Volatile.Read(ref _roadFilterRejectedError)} error (so far).");
+            return hasRoad;
+        }
+        catch
+        {
+            Interlocked.Increment(ref _roadFilterRejectedError);
+            var total = Interlocked.Increment(ref _roadFilterTotalCalls);
+            if (total % 100 == 0)
+                Console.WriteLine($"  Road filter: {Volatile.Read(ref _roadFilterAccepted)} accepted, {Volatile.Read(ref _roadFilterRejectedRoad)} had road, {Volatile.Read(ref _roadFilterRejectedError)} error (so far).");
+            return true; // API error; reject so we only keep locations we successfully verified (same as VMG: no result = no add)
+        }
     }
 
     public static async Task<string?> Shorten(double lat, double lng, string panoId)

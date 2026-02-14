@@ -1,4 +1,4 @@
-﻿using ICSharpCode.SharpZipLib.BZip2;
+using ICSharpCode.SharpZipLib.BZip2;
 using Microsoft.Extensions.Logging;
 using Spectre.Console;
 using System.Diagnostics;
@@ -14,7 +14,7 @@ public static class DataDownloadService
     private const string CountriesBucketName = "countries-v2";
     private const string CountryUpdatesBucketName = "country-updates-v2";
 
-    private static readonly HttpClient R2BucketClient = new()
+    private static readonly HttpClient R2BucketClient = new(new SocketsHttpHandler { UseCookies = false })
     {
         BaseAddress = new Uri("https://vali-download.slashp.workers.dev")
     };
@@ -292,8 +292,9 @@ public static class DataDownloadService
         }
 
         var defaultDownloadFolderEnvironment = ApplicationSettingsService.ReadDownloadFolderFromEnvironmentVariable();
-        var defaultDownloadFolder = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-        var downloadFolder = defaultDownloadFolderEnvironment ?? applicationSettings.DownloadDirectory ?? defaultDownloadFolder;
+        var projectValiData = Path.Combine(Environment.CurrentDirectory, "vali-data");
+        var systemDefaultFolder = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        var downloadFolder = defaultDownloadFolderEnvironment ?? applicationSettings.DownloadDirectory ?? projectValiData ?? systemDefaultFolder;
         return Path.Combine(downloadFolder, "Vali");
     }
 

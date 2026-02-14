@@ -1,4 +1,5 @@
-﻿using Spectre.Console;
+using Spectre.Console;
+using Vali.Core.Google;
 using Vali.Core.Hash;
 using Loc = Vali.Core.Location;
 
@@ -19,7 +20,7 @@ public static class DistributionStrategies
         FixedCountByCoverageDensity
     ];
 
-    public static (IList<Loc> locations, int regionGoalCount, int minDistance) SubdivisionByMaxMinDistance(
+    public static async Task<(IList<Loc> locations, int regionGoalCount, int minDistance)> SubdivisionByMaxMinDistance(
         string countryCode,
         string file,
         int goalCount,
@@ -59,14 +60,14 @@ public static class DistributionStrategies
             return (Array.Empty<Loc>(), 0, 0);
         }
 
-        var tuple = ByMaxMinDistance(filteredLocations, regionGoalCount, neighborLocationBuckets, minDistance, mapDefinition, countryCode, subdivision);
+        var tuple = await ByMaxMinDistanceAsync(filteredLocations, regionGoalCount, neighborLocationBuckets, minDistance, mapDefinition, countryCode, subdivision);
         var diff = regionGoalCount - tuple.locations.Count;
         var notEnoughLocationsMessage = diff > 0 ? $"[olive]{diff,4} locations short.[/]" : "";
         AnsiConsole.MarkupLine($"[lightseagreen]{tuple.locations.Count,6:N0} locations in {subdivision,7}. At least {tuple.minDistance,7:N0}m. between each location.[/]{notEnoughLocationsMessage}");
         return (tuple.locations, regionGoalCount, tuple.minDistance);
     }
 
-    public static (IList<Loc> locations, int regionGoalCount, int minDistance) SubdivisionByCoverageDensity(
+    public static async Task<(IList<Loc> locations, int regionGoalCount, int minDistance)> SubdivisionByCoverageDensity(
         string countryCode,
         string file,
         int goalCount,
@@ -106,10 +107,10 @@ public static class DistributionStrategies
             return (Array.Empty<Loc>(), 0, 0);
         }
 
-        return LocationsByCoverageDensity(countryCode, mapDefinition, filteredLocations, regionGoalCount, neighborLocationBuckets, minDistance, subdivision);
+        return await LocationsByCoverageDensity(countryCode, mapDefinition, filteredLocations, regionGoalCount, neighborLocationBuckets, minDistance, subdivision);
     }
 
-    public static (IList<Loc> locations, int regionGoalCount, int minDistance)[] CountryByCoverageDensity(
+    public static async Task<(IList<Loc> locations, int regionGoalCount, int minDistance)[]> CountryByCoverageDensity(
         string countryCode,
         string[] files,
         int goalCount,
@@ -144,10 +145,10 @@ public static class DistributionStrategies
             .AsParallel()
             .SelectMany(x => LocationDistributor.GetSome<Loc, long>([.. x], (120_000m / files.Length).RoundToInt(), minDistance / 2, locationProbability))
             .ToArray();
-        return [LocationsByCoverageDensity(countryCode, mapDefinition, filteredLocations, goalCount, neighborLocationBuckets, minDistance, "N/A")];
+        return [await LocationsByCoverageDensity(countryCode, mapDefinition, filteredLocations, goalCount, neighborLocationBuckets, minDistance, "N/A")];
     }
 
-    private static (IList<Loc> locations, int regionGoalCount, int minDistance) LocationsByCoverageDensity(
+    private static async Task<(IList<Loc> locations, int regionGoalCount, int minDistance)> LocationsByCoverageDensity(
         string countryCode,
         MapDefinition mapDefinition,
         Loc[] filteredLocations,
@@ -176,7 +177,7 @@ public static class DistributionStrategies
         foreach (var locationCluster in locationClusters)
         {
             var count = (int)Math.Round(regionGoalCount * weights[locationCluster.Key], 0);
-            var tuple = ByMaxMinDistance(locationCluster.ToArray(), count, neighborLocationBuckets, minDistance, mapDefinition, countryCode, subdivision);
+            var tuple = await ByMaxMinDistanceAsync(locationCluster.ToArray(), count, neighborLocationBuckets, minDistance, mapDefinition, countryCode, subdivision);
             resultLocations.AddRange(tuple.locations);
             resultMinDistance = Math.Min(tuple.minDistance, resultMinDistance);
         }
@@ -203,7 +204,7 @@ public static class DistributionStrategies
         return filteredLocations;
     }
 
-    public static (IList<Loc> locations, int regionGoalCount, int minDistance)[] CountryByMaxMinDistance(
+    public static async Task<(IList<Loc> locations, int regionGoalCount, int minDistance)[]> CountryByMaxMinDistance(
         string countryCode,
         string[] files,
         int goalCount,
@@ -238,14 +239,14 @@ public static class DistributionStrategies
             .AsParallel()
             .SelectMany(x => LocationDistributor.GetSome<Loc, long>([.. x], (120_000m/files.Length).RoundToInt(), minDistance / 2, locationProbability))
             .ToArray();
-        var tuple = ByMaxMinDistance(filteredLocations, goalCount, neighborLocationBuckets, minDistance, mapDefinition, countryCode, "");
+        var tuple = await ByMaxMinDistanceAsync(filteredLocations, goalCount, neighborLocationBuckets, minDistance, mapDefinition, countryCode, "");
         var diff = goalCount - tuple.locations.Count;
         var notEnoughLocationsMessage = diff > 0 ? $"[olive]{diff,4} locations short.[/]" : "";
         AnsiConsole.MarkupLine($"[lightseagreen]Generated {tuple.locations.Count,6:N0} locations in {countryCode}. At least {tuple.minDistance,7:N0}m. between each location.[/]{notEnoughLocationsMessage}");
         return [(tuple.locations, goalCount, tuple.minDistance)];
     }
 
-    public static (IList<Loc> locations, int regionGoalCount, int minDistance)[] MaxLocationsInSubdivisionsByFixedMinDistance(
+    public static async Task<(IList<Loc> locations, int regionGoalCount, int minDistance)[]> MaxLocationsInSubdivisionsByFixedMinDistance(
         string countryCode,
         string[] files,
         string[] availableSubdivisions,
@@ -341,9 +342,13 @@ public static class DistributionStrategies
                     subdivisionWeights.Sum(y => y.Value) * totalGoalCount).RoundToInt()
                 : SubdivisionWeights.GoalForSubdivision(countryCode, x.Key, maxLocationCountSatisfyingFixedMinDistance,
                     availableSubdivisions));
-        return locations.Select(x =>
-            (ByMaxMinDistance(allAvailableLocations[x.Key], subdivisionGoalCountsSatisfyingFixedMinDistance[x.Key], neighborLocationsBuckets[x.Key], subdivisionGoalCountsSatisfyingFixedMinDistance[x.Key], mapDefinition, countryCode, x.Key).locations,
-                subdivisionGoalCountsSatisfyingFixedMinDistance[x.Key], fixedMinDistance)).ToArray();
+        var results = new List<(IList<Loc> locations, int regionGoalCount, int minDistance)>();
+        foreach (var x in locations)
+        {
+            var tuple = await ByMaxMinDistanceAsync(allAvailableLocations[x.Key], subdivisionGoalCountsSatisfyingFixedMinDistance[x.Key], neighborLocationsBuckets[x.Key], subdivisionGoalCountsSatisfyingFixedMinDistance[x.Key], mapDefinition, countryCode, x.Key);
+            results.Add((tuple.locations, subdivisionGoalCountsSatisfyingFixedMinDistance[x.Key], fixedMinDistance));
+        }
+        return results.ToArray();
 
         int LargestSuccessCount()
         {
@@ -385,7 +390,7 @@ public static class DistributionStrategies
         return [(locations, -1, minDistanceBetweenLocations)];
     }
 
-    private static (IList<Loc> locations, int minDistance) ByMaxMinDistance(
+    private static async Task<(IList<Loc> locations, int minDistance)> ByMaxMinDistanceAsync(
         Loc[] filteredLocations,
         int regionGoalCount,
         Dictionary<string, List<Loc>> neighborLocationBuckets,
@@ -425,7 +430,9 @@ public static class DistributionStrategies
                     : (regionGoalCount * locationPreferenceFilter.Percentage / 100m).Value.RoundToInt();
                 var minMinDistance = locationPreferenceFilter.MinMinDistance ?? minDistance;
                 IReadOnlyCollection<ILatLng> locationsAlreadyInMap = usedLocations.Any() ? locations.Concat<ILatLng>(usedLocations).ToArray() : locations;
-                var withMaxMinDistance = LocationDistributor.WithMaxMinDistance<Loc, long>(filtered, goalCount, minMinDistance: minMinDistance, locationsAlreadyInMap: locationsAlreadyInMap, locationProbability: locationProbability);
+                var withMaxMinDistance = mapDefinition.RejectRoadName
+                    ? await LocationDistributor.WithMaxMinDistanceAsync<Loc, long>(filtered, goalCount, minMinDistance: minMinDistance, locationsAlreadyInMap: locationsAlreadyInMap, locationProbability: locationProbability, includePredicate: async loc => !await GoogleApi.HasRoadName(loc.Google.PanoId ?? ""))
+                    : LocationDistributor.WithMaxMinDistance<Loc, long>(filtered, goalCount, minMinDistance: minMinDistance, locationsAlreadyInMap: locationsAlreadyInMap, locationProbability: locationProbability);
                 lastMinMinDistance = withMaxMinDistance.minDistance;
                 IEnumerable<Loc> locationsFromPreference = withMaxMinDistance.locations;
                 if (!string.IsNullOrEmpty(locationPreferenceFilter.LocationTag))
@@ -441,7 +448,9 @@ public static class DistributionStrategies
             return (locations, lastMinMinDistance);
         }
 
-        return LocationDistributor.WithMaxMinDistance<Loc, long>(filteredLocations, regionGoalCount, minMinDistance: minDistance, locationsAlreadyInMap: usedLocations, locationProbability: locationProbability);
+        return mapDefinition.RejectRoadName
+            ? await LocationDistributor.WithMaxMinDistanceAsync<Loc, long>(filteredLocations, regionGoalCount, minMinDistance: minDistance, locationsAlreadyInMap: usedLocations, locationProbability: locationProbability, includePredicate: async loc => !await GoogleApi.HasRoadName(loc.Google.PanoId ?? ""))
+            : LocationDistributor.WithMaxMinDistance<Loc, long>(filteredLocations, regionGoalCount, minMinDistance: minDistance, locationsAlreadyInMap: usedLocations, locationProbability: locationProbability);
     }
 
     private static string? LocationFilter(string countryCode, MapDefinition mapDefinition, string subdivision)
