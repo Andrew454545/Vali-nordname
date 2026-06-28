@@ -1,17 +1,25 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using Spectre.Console;
 using System.Globalization;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using Vali.Core.Google;
 
 namespace Vali.Core;
 
-public static class Extensions
+public static partial class Extensions
 {
+    /// <summary>
+    /// Calculates the great-circle distance between two points on Earth using the haversine formula.
+    /// This is the most accurate method for calculating distances between geographical coordinates.
+    /// </summary>
+    /// <param name="lat1">Latitude of first point in decimal degrees</param>
+    /// <param name="lon1">Longitude of first point in decimal degrees</param>
+    /// <param name="lat2">Latitude of second point in decimal degrees</param>
+    /// <param name="lon2">Longitude of second point in decimal degrees</param>
+    /// <returns>Distance between points in meters</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static double CalculateDistance(double lat1, double lon1, double lat2, double lon2)
     {
@@ -20,6 +28,15 @@ public static class Extensions
         return 12745.6 * Math.Asin(Math.Sqrt(havf(lat2 - lat1) + Math.Cos(rad(lat1)) * Math.Cos(rad(lat2)) * havf(lon2 - lon1))) * 1000; // earth radius 6.372,8‬km x 2 = 12745.6
     }
 
+/// <summary>
+    /// Calculates the great-circle distance between two points on Earth using the haversine formula (decimal version).
+    /// This is the most accurate method for calculating distances between geographical coordinates.
+    /// </summary>
+    /// <param name="lat1">Latitude of first point in decimal degrees</param>
+    /// <param name="lon1">Longitude of first point in decimal degrees</param>
+    /// <param name="lat2">Latitude of second point in decimal degrees</param>
+    /// <param name="lon2">Longitude of second point in decimal degrees</param>
+    /// <returns>Distance between points in meters</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static decimal CalculateDistance(decimal lat1, decimal lon1, decimal lat2, decimal lon2)
     {
@@ -29,6 +46,15 @@ public static class Extensions
         return asin; // earth radius 6.372,8‬km x 2 = 12745.6
     }
 
+/// <summary>
+    /// Calculates approximate distance between two points using equirectangular projection.
+    /// Faster than haversine but less accurate, suitable for small distances.
+    /// </summary>
+    /// <param name="lat1">Latitude of first point in decimal degrees</param>
+    /// <param name="lon1">Longitude of first point in decimal degrees</param>
+    /// <param name="lat2">Latitude of second point in decimal degrees</param>
+    /// <param name="lon2">Longitude of second point in decimal degrees</param>
+    /// <returns>Approximate distance between points in meters</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static double ApproximateDistance(double lat1, double lon1, double lat2, double lon2)
     {
@@ -40,31 +66,48 @@ public static class Extensions
         return R * Math.Sqrt(x * x + y * y);
     }
 
-    private static readonly int MaxDistance = LocationDistributor.Distances.Max();
+    private const double DegToRad = 0.017453292519943295769236907684886127d;
+    private const double HalfDegToRad = DegToRad * 0.5;
+    private const double MetersPerDegreeSquared = 6371137.0 * DegToRad * (6371137.0 * DegToRad);
+    private const double InverseLatMetersSquared = 1.0 / (110000.0 * 110000.0);
 
-    public static readonly int LatitudeBucketSize = 5;
-
-    private static readonly double[] LatitudeDifferenceArray =
-        Enumerable.Range(0, MaxDistance / LatitudeBucketSize + 1).Select(i => i * LatitudeBucketSize / (double)110000).ToArray();
-
+/// <summary>
+    /// Optimized proximity check that uses latitude pre-filtering for performance.
+    /// First checks if points are definitely farther apart based on latitude difference,
+    /// then uses approximate distance calculation for final verification.
+    /// </summary>
+    /// <param name="lat1">Latitude of first point in decimal degrees</param>
+    /// <param name="lon1">Longitude of first point in decimal degrees</param>
+    /// <param name="lat2">Latitude of second point in decimal degrees</param>
+    /// <param name="lon2">Longitude of second point in decimal degrees</param>
+    /// <param name="meters">Maximum distance in meters</param>
+    /// <returns>True if points are closer than specified distance</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static bool PointsAreCloserThan(double lat1, double lon1, double lat2, double lon2, int meters)
+    public static bool PointsAreCloserThan(double lat1, double lon1, double lat2, double lon2, double metersSquared)
     {
-        if (meters > MaxDistance)
-        {
-            return ApproximateDistance(lat1, lon1, lat2, lon2) < meters;
-        }
-
-        var latitudeDifference = LatitudeDifferenceArray[meters / LatitudeBucketSize];
-        var isDefinitelyFartherAway = Math.Abs(lat1 - lat2) > latitudeDifference;
-        if (isDefinitelyFartherAway)
+        var dlat = lat2 - lat1;
+        if (dlat * dlat > metersSquared * InverseLatMetersSquared)
         {
             return false;
         }
 
-        return ApproximateDistance(lat1, lon1, lat2, lon2) < meters;
+        var dlon = lon2 - lon1;
+        var cosLat = Math.Cos((lat1 + lat2) * HalfDegToRad);
+        var x = dlon * cosLat;
+        return MetersPerDegreeSquared * (x * x + dlat * dlat) < metersSquared;
     }
 
+/// <summary>
+    /// Decimal proximity check optimized for short distances (max 1000m).
+    /// Uses fast coordinate difference filtering followed by accurate haversine calculation.
+    /// </summary>
+    /// <param name="lat1">Latitude of first point in decimal degrees</param>
+    /// <param name="lon1">Longitude of first point in decimal degrees</param>
+    /// <param name="lat2">Latitude of second point in decimal degrees</param>
+    /// <param name="lon2">Longitude of second point in decimal degrees</param>
+    /// <param name="meters">Maximum distance in meters (max 1000)</param>
+    /// <returns>True if points are closer than specified distance</returns>
+    /// <exception cref="ArgumentException">Thrown when distance exceeds 1000 meters</exception>
     public static bool PointsAreCloserThan(decimal lat1, decimal lon1, decimal lat2, decimal lon2, int meters)
     {
         if (meters > 1000)
@@ -81,7 +124,6 @@ public static class Extensions
     }
 
     public static string? SafeSubstring(this string value, int length) => value?.Length > length ? value.Substring(0, length) : value;
-    public static string AsStringFromCharArray(this IEnumerable<char> characters) => new string(characters.ToArray());
     public static string Format(this decimal d) => d.ToString(CultureInfo.InvariantCulture);
     public static string Format(this double d) => d.ToString(CultureInfo.InvariantCulture);
     public static decimal Round(this decimal d, int precision) => decimal.Round(d, precision);
@@ -163,13 +205,30 @@ public static class Extensions
         }
     }
 
-    public static IEnumerable<T> TakeRandom<T>(this IEnumerable<T> collection, int take) =>
-        collection == null ? [] : collection.Count() <= take ? collection : collection.OrderBy(_ => Random.Shared.Next()).Take(take);
+    public static IEnumerable<T> TakeRandom<T>(this IEnumerable<T> collection, int take)
+    {
+        if (collection == null) return [];
+        var array = collection as T[] ?? collection.ToArray();
+        if (array.Length <= take) return array;
+        for (var i = 0; i < take; i++)
+        {
+            var j = Random.Shared.Next(i, array.Length);
+            (array[i], array[j]) = (array[j], array[i]);
+        }
+
+        return array[..take];
+    }
 
     public static T ProtoDeserializeFromFile<T>(string path)
     {
         using var file = File.OpenRead(path);
         return ProtoBuf.Serializer.Deserialize<T>(file);
+    }
+
+    public static T ProtoDeserializeFromFile<T>(string path, ProtoBuf.Meta.TypeModel model)
+    {
+        using var file = File.OpenRead(path);
+        return (T)model.Deserialize(file, null, typeof(T));
     }
 
     public static async ValueTask ProtoSerializeToFile<T>(string path, T data)
@@ -224,34 +283,6 @@ public static class Extensions
             yield return index;
         }
     }
-
-    public const char PlaceholderValue = '$';
-
-    public static (string expressionWithPlaceholders, List<(string oldValue, string newValue)>) ReplaceValuesInSingleQuotesWithPlaceHolders(this string input)
-    {
-        var counter = 0;
-        var list = new List<(string oldValue, string newValue)>();
-        input = input.Replace("\\'", "$900001");
-        var matches = Regex.Matches(input, "'([^']*)'");
-        foreach (Match match in matches)
-        {
-            var matchedValue = match.Groups[1].Value;
-            var i = (counter++).ToString().PadLeft(7, '0');
-            var newValue = $"{PlaceholderValue}{i}";
-            list.Add((matchedValue, newValue));
-            input = input.Replace($"'{matchedValue}'", $"'{newValue}'");
-        }
-
-        list.Add(("\\'", "$900001"));
-        return (input, list);
-    }
-
-    public static string RemoveMultipleSpaces(this string input) => Regex.Replace(input, @"\s+", " ");
-    public static string RemoveParentheses(this string input) => input.Replace("(", "").Replace(")", "");
-    public static string SpacePad(this string input) => $" {input} ";
-
-    public static string SpacePadParentheses(this string input) =>
-        input.Replace("(", "(".SpacePad()).Replace(")", ")".SpacePad());
 
     public static string? Truncate(this string? value, int length)
         => (value != null && value.Length > length) ? value[..length] : value;

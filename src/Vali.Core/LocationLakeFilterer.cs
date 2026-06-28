@@ -1,7 +1,8 @@
 ﻿using System.Collections.Concurrent;
-using System.Linq.Dynamic.Core;
-using System.Linq.Expressions;
+using System.Collections.Frozen;
 using NetTopologySuite.Geometries;
+using NetTopologySuite.Geometries.Prepared;
+using Vali.Core.Expressions;
 using Vali.Core.Google;
 using Loc = Vali.Core.Location;
 
@@ -9,21 +10,21 @@ namespace Vali.Core;
 
 public static class LocationLakeFilterer
 {
-    public static readonly string[] CountryCodesAcceptableWithoutDescription =
-    [
+    public static readonly FrozenSet<string> CountryCodesAcceptableWithoutDescription = new[]
+    {
         "CX", "CC", "MP", "GU", "EG", "ML", "MG", "PN", "GL", "MN", "KR", "FO", "UG", "KG", "RW", "LB", "RE",
         "MQ", "NP", "PK", "BY", "UM"
-    ];
+    }.ToFrozenSet();
 
-    public static readonly string[] SubdivisionCodesAcceptableWithoutDescription =
-    [
+    public static readonly FrozenSet<string> SubdivisionCodesAcceptableWithoutDescription = new[]
+    {
         "NO-21", "CA-NU", "US-AK", "BR-PE"
-    ];
+    }.ToFrozenSet();
 
     public static Loc[] Filter(
         IReadOnlyCollection<Loc> locationsFromFile,
-        Dictionary<string, List<Loc>> neighborLocationBuckets,
-        Dictionary<string, List<ILatLng>> proximityLocationBuckets,
+        Dictionary<ulong, List<Loc>> neighborLocationBuckets,
+        Dictionary<ulong, List<ILatLng>> proximityLocationBuckets,
         string? locationFilterExpression,
         ProximityFilter proximityFilter,
         (GeometryFilter filter, Geometry[] geometries)[] geometryFilters,
@@ -79,7 +80,7 @@ public static class LocationLakeFilterer
             locations = NeighborFilterer.FilterByNeighbors(locations, neighborLocationBuckets, neighborFilter, mapDefinition);
         }
 
-        return locations.DistinctBy(l => l.NodeId).ToArray();
+        return GenerationDeterminism.InCanonicalOrder(locations.DistinctBy(l => l.NodeId)).ToArray();
     }
 
     private static readonly ConcurrentDictionary<string, Func<Loc, int>> _cacheInt = new();
@@ -137,159 +138,37 @@ public static class LocationLakeFilterer
 
     public static Func<TLoc, T> CompileExpression<TLoc, T>(string initialExpression, T fallback)
     {
-        if (initialExpression == "*")
+        var resolver = typeof(TLoc).Name switch
         {
-            return _ => fallback;
-        }
-
-        var (expressionWithPlaceholders, placeHolders) = initialExpression.ReplaceValuesInSingleQuotesWithPlaceHolders();
-        var componentsInExpression = expressionWithPlaceholders
-            .RemoveMultipleSpaces()
-            .RemoveParentheses()
-            .Split(' ');
-        var validProperties = typeof(TLoc).Name switch
-        {
-            nameof(Location) => ValidProperties().Concat(componentsInExpression.Where(x => x.StartsWith("external:"))),
-            nameof(MapCheckrLocation) => ValidMapCheckrLocationProperties(),
+            nameof(Location) => PropertyResolver.ForLocation(),
+            nameof(MapCheckrLocation) => PropertyResolver.ForMapCheckrLocation(),
             _ => throw new ArgumentOutOfRangeException()
         };
-        Func<string, string> lambdaExpressionFunc = typeof(TLoc).Name switch
-        {
-            nameof(Location) => s => LocationLambdaExpressionFromProperty(s, "x"),
-            nameof(MapCheckrLocation) => MapCheckrLocationLambdaExpressionFromProperty,
-            _ => throw new ArgumentOutOfRangeException()
-        };
-        var totalExpression = validProperties
-            .Intersect(componentsInExpression.Select(x => x.Trim()))
-            .Aggregate(expressionWithPlaceholders.SpacePadParentheses().SpacePad(), (current, validProperty) => current.Replace(validProperty.SpacePad(), lambdaExpressionFunc(validProperty).SpacePad()));
-        var validOperators = ValidOperators();
-        totalExpression = validOperators
-            .Intersect(componentsInExpression.Select(x => x.Trim()))
-            .Aggregate(totalExpression, (current, validOperator) => current.Replace(validOperator.SpacePad(), CSharpOperatorFromOperator(validOperator).SpacePad()));
-        totalExpression = totalExpression.Replace("'", "\"");
-        foreach (var placeHolder in placeHolders)
-        {
-            totalExpression = totalExpression.Replace(placeHolder.newValue, placeHolder.oldValue);
-        }
-
-        totalExpression = totalExpression.Replace("\\'", "'");
-        var parameter = Expression.Parameter(typeof(TLoc), "x");
-        var expression = (Expression)DynamicExpressionParser.ParseLambda([parameter], null, totalExpression);
-        var typedExpression = ((Expression<Func<TLoc, T>>)expression).Compile();
-        return typedExpression;
+        return ExpressionCompiler.Compile<TLoc, T>(initialExpression, fallback, resolver);
     }
 
     public static Func<TLoc, TLoc, T> CompileExpressionWithParent<TLoc, T>(string initialExpression, T fallback)
     {
-        if (initialExpression == "*")
+        var resolver = typeof(TLoc).Name switch
         {
-            return (_, _) => fallback;
-        }
-
-        var (expressionWithPlaceholders, placeHolders) = initialExpression.ReplaceValuesInSingleQuotesWithPlaceHolders();
-        var componentsInExpression = expressionWithPlaceholders
-            .RemoveMultipleSpaces()
-            .RemoveParentheses()
-            .Split(' ');
-        const string primaryLambdaParameterName = "x";
-        const string parentLambdaParameterName = "current:";
-        var validProperties = (typeof(TLoc).Name switch
-            {
-                nameof(Location) => ValidProperties().Concat(componentsInExpression.Where(x => x.StartsWith("external:"))),
-                nameof(MapCheckrLocation) => ValidMapCheckrLocationProperties(),
-                _ => throw new ArgumentOutOfRangeException()
-            })
-            .SelectMany(x => new (string PropertyName, string LambdaParameterName)[]
-            {
-                (PropertyName: x, primaryLambdaParameterName),
-                ($"{parentLambdaParameterName}{x}", parentLambdaParameterName)
-            })
-            .ToArray();
-        Func<string, string, string> lambdaExpressionFunc = typeof(TLoc).Name switch
-        {
-            nameof(Location) => LocationLambdaExpressionFromProperty,
-            nameof(MapCheckrLocation) => (s, _) => MapCheckrLocationLambdaExpressionFromProperty(s),
+            nameof(Location) => PropertyResolver.ForLocation(),
+            nameof(MapCheckrLocation) => PropertyResolver.ForMapCheckrLocation(),
             _ => throw new ArgumentOutOfRangeException()
         };
-        var totalExpression = validProperties
-            .IntersectBy(componentsInExpression.Select(x => x.Trim()), tuple => tuple.PropertyName)
-            .Aggregate(expressionWithPlaceholders.SpacePadParentheses().SpacePad(), (current, validProperty) => current.Replace(validProperty.PropertyName.SpacePad(), lambdaExpressionFunc(validProperty.PropertyName, validProperty.LambdaParameterName).SpacePad()));
-        var validOperators = ValidOperators();
-        totalExpression = validOperators
-            .Intersect(componentsInExpression.Select(x => x.Trim()))
-            .Aggregate(totalExpression, (current, validOperator) => current.Replace(validOperator.SpacePad(), CSharpOperatorFromOperator(validOperator).SpacePad()));
-        totalExpression = totalExpression.Replace("'", "\"");
-        foreach (var placeHolder in placeHolders)
-        {
-            totalExpression = totalExpression.Replace(placeHolder.newValue, placeHolder.oldValue);
-        }
-
-        totalExpression = totalExpression.Replace("\\'", "'");
-        var parameter = Expression.Parameter(typeof(TLoc), primaryLambdaParameterName);
-        var parentParameter = Expression.Parameter(typeof(TLoc), new string(parentLambdaParameterName.Where(char.IsAsciiLetter).ToArray()));
-        var expression = (Expression)DynamicExpressionParser.ParseLambda([parameter, parentParameter], null, totalExpression);
-        var typedExpression = ((Expression<Func<TLoc, TLoc, T>>)expression).Compile();
-        return typedExpression;
+        return ExpressionCompiler.CompileWithParent<TLoc, T>(initialExpression, fallback, resolver);
     }
 
-    public static IReadOnlyCollection<string> ValidProperties() =>
-    [
-        nameof(Loc.Osm.Surface),
-        nameof(Loc.Osm.Buildings10),
-        nameof(Loc.Osm.Buildings25),
-        nameof(Loc.Osm.Buildings100),
-        nameof(Loc.Osm.Buildings200),
-        nameof(Loc.Osm.Roads0),
-        nameof(Loc.Osm.Roads10),
-        nameof(Loc.Osm.Roads25),
-        nameof(Loc.Osm.Roads50),
-        nameof(Loc.Osm.Roads100),
-        nameof(Loc.Osm.Roads200),
-        nameof(Loc.Osm.Tunnels10),
-        nameof(Loc.Osm.Tunnels200),
-        nameof(Loc.Osm.IsResidential),
-        nameof(Loc.Osm.ClosestCoast),
-        nameof(Loc.Osm.ClosestLake),
-        nameof(Loc.Osm.ClosestRiver),
-        nameof(Loc.Osm.ClosestRailway),
-        nameof(Loc.Osm.HighwayType),
-        nameof(Loc.Osm.HighwayTypeCount),
-        nameof(Loc.Osm.WayId),
-        nameof(Loc.Google.Month),
-        nameof(Loc.Google.Year),
-        nameof(Loc.Google.Lat),
-        nameof(Loc.Google.Lng),
-        nameof(Loc.Google.Heading),
-        nameof(Loc.Google.DrivingDirectionAngle),
-        nameof(Loc.Google.ArrowCount),
-        nameof(Loc.Google.Elevation),
-        nameof(Loc.Google.DescriptionLength),
-        nameof(Loc.Google.IsScout),
-        nameof(Loc.Google.ResolutionHeight),
-        nameof(Loc.Nominatim.CountryCode),
-        nameof(Loc.Nominatim.SubdivisionCode),
-        nameof(Loc.Nominatim.County)
-    ];
+    private static readonly IReadOnlyCollection<string> _validProperties =
+        PropertyResolver.ForLocation().ValidPropertyNames;
 
-    public static IReadOnlyCollection<string> ValidMapCheckrLocationProperties() =>
-    [
-        nameof(MapCheckrLocation.lat),
-        nameof(MapCheckrLocation.lng),
-        nameof(MapCheckrLocation.countryCode),
-        nameof(MapCheckrLocation.arrowCount),
-        nameof(MapCheckrLocation.descriptionLength),
-        nameof(MapCheckrLocation.drivingDirectionAngle),
-        nameof(MapCheckrLocation.heading),
-        nameof(MapCheckrLocation.month),
-        nameof(MapCheckrLocation.year),
-        nameof(MapCheckrLocation.isScout),
-        nameof(MapCheckrLocation.resolutionHeight),
-        nameof(MapCheckrLocation.subdivision),
-        nameof(MapCheckrLocation.panoramaCount),
-        nameof(MapCheckrLocation.elevation),
-    ];
+    public static IReadOnlyCollection<string> ValidProperties() => _validProperties;
 
-    public static IEnumerable<string> ValidOperators() =>
+    private static readonly IReadOnlyCollection<string> _validMapCheckrLocationProperties =
+        PropertyResolver.ForMapCheckrLocation().ValidPropertyNames;
+
+    public static IReadOnlyCollection<string> ValidMapCheckrLocationProperties() => _validMapCheckrLocationProperties;
+
+    private static readonly string[] _validOperators =
     [
         "eq",
         "neq",
@@ -303,110 +182,62 @@ public static class LocationLakeFilterer
         "-",
         "/",
         "*",
-        "modulo"
+        "modulo",
+        "in"
     ];
 
-    private static string LocationLambdaExpressionFromProperty(string property, string lambdaParameterName)
-    {
-        var resultLambdaParameterName = new string(lambdaParameterName.Where(char.IsAsciiLetter).ToArray());
-        return property.TrimStart(lambdaParameterName) switch
-        {
-            nameof(Loc.Osm.Surface) => $"{resultLambdaParameterName}.Osm.{nameof(Loc.Osm.Surface)}",
-            nameof(Loc.Osm.Buildings100) => $"{resultLambdaParameterName}.Osm.{nameof(Loc.Osm.Buildings100)}",
-            nameof(Loc.Osm.Buildings200) => $"{resultLambdaParameterName}.Osm.{nameof(Loc.Osm.Buildings200)}",
-            nameof(Loc.Osm.Buildings25) => $"{resultLambdaParameterName}.Osm.{nameof(Loc.Osm.Buildings25)}",
-            nameof(Loc.Osm.Roads100) => $"{resultLambdaParameterName}.Osm.{nameof(Loc.Osm.Roads100)}",
-            nameof(Loc.Osm.Roads200) => $"{resultLambdaParameterName}.Osm.{nameof(Loc.Osm.Roads200)}",
-            nameof(Loc.Osm.Roads25) => $"{resultLambdaParameterName}.Osm.{nameof(Loc.Osm.Roads25)}",
-            nameof(Loc.Osm.Roads50) => $"{resultLambdaParameterName}.Osm.{nameof(Loc.Osm.Roads50)}",
-            nameof(Loc.Osm.Tunnels10) => $"{resultLambdaParameterName}.Osm.{nameof(Loc.Osm.Tunnels10)}",
-            nameof(Loc.Osm.Tunnels200) => $"{resultLambdaParameterName}.Osm.{nameof(Loc.Osm.Tunnels200)}",
-            nameof(Loc.Osm.Buildings10) => $"{resultLambdaParameterName}.Osm.{nameof(Loc.Osm.Buildings10)}",
-            nameof(Loc.Osm.IsResidential) => $"{resultLambdaParameterName}.Osm.{nameof(Loc.Osm.IsResidential)}",
-            nameof(Loc.Osm.Roads10) => $"{resultLambdaParameterName}.Osm.{nameof(Loc.Osm.Roads10)}",
-            nameof(Loc.Osm.Roads0) => $"{resultLambdaParameterName}.Osm.{nameof(Loc.Osm.Roads0)}",
-            nameof(Loc.Osm.ClosestCoast) => $"{resultLambdaParameterName}.Osm.{nameof(Loc.Osm.ClosestCoast)}",
-            nameof(Loc.Osm.ClosestLake) => $"{resultLambdaParameterName}.Osm.{nameof(Loc.Osm.ClosestLake)}",
-            nameof(Loc.Osm.ClosestRiver) => $"{resultLambdaParameterName}.Osm.{nameof(Loc.Osm.ClosestRiver)}",
-            nameof(Loc.Osm.ClosestRailway) => $"{resultLambdaParameterName}.Osm.{nameof(Loc.Osm.ClosestRailway)}",
-            nameof(Loc.Osm.HighwayType) => $"{resultLambdaParameterName}.Osm.{nameof(Loc.Osm.HighwayType)}",
-            nameof(Loc.Osm.HighwayTypeCount) => $"{resultLambdaParameterName}.Osm.{nameof(Loc.Osm.HighwayTypeCount)}",
-            nameof(Loc.Osm.WayId) => $"{resultLambdaParameterName}.Osm.{nameof(Loc.Osm.WayId)}",
-            nameof(Loc.Google.Month) => $"{resultLambdaParameterName}.Google.{nameof(Loc.Google.Month)}",
-            nameof(Loc.Google.Year) => $"{resultLambdaParameterName}.Google.{nameof(Loc.Google.Year)}",
-            nameof(Loc.Google.Lat) => $"{resultLambdaParameterName}.Google.{nameof(Loc.Google.Lat)}",
-            nameof(Loc.Google.Lng) => $"{resultLambdaParameterName}.Google.{nameof(Loc.Google.Lng)}",
-            nameof(Loc.Google.Heading) => $"{resultLambdaParameterName}.Google.{nameof(Loc.Google.Heading)}",
-            nameof(Loc.Google.DrivingDirectionAngle) =>
-                $"{resultLambdaParameterName}.Google.{nameof(Loc.Google.DrivingDirectionAngle)}",
-            nameof(Loc.Google.ArrowCount) => $"{resultLambdaParameterName}.Google.{nameof(Loc.Google.ArrowCount)}",
-            nameof(Loc.Google.Elevation) => $"{resultLambdaParameterName}.Google.{nameof(Loc.Google.Elevation)}",
-            nameof(Loc.Google.DescriptionLength) =>
-                $"{resultLambdaParameterName}.Google.{nameof(Loc.Google.DescriptionLength)}",
-            nameof(Loc.Google.IsScout) => $"{resultLambdaParameterName}.Google.{nameof(Loc.Google.IsScout)}",
-            nameof(Loc.Google.ResolutionHeight) =>
-                $"{resultLambdaParameterName}.Google.{nameof(Loc.Google.ResolutionHeight)}",
-            nameof(Loc.Nominatim.CountryCode) => $"{resultLambdaParameterName}.Nominatim.{nameof(Loc.Nominatim.CountryCode)}",
-            nameof(Loc.Nominatim.SubdivisionCode) =>
-                $"{resultLambdaParameterName}.Nominatim.{nameof(Loc.Nominatim.SubdivisionCode)}",
-            nameof(Loc.Nominatim.County) => $"{resultLambdaParameterName}.Nominatim.{nameof(Loc.Nominatim.County)}",
-            _ when property.StartsWith("external:") => $"{resultLambdaParameterName}.ExternalData[\"{property.SkipWhile(c => c != ':').Skip(1).AsStringFromCharArray()}\"]",
-            _ => throw new ArgumentOutOfRangeException(nameof(property), property, null)
-        };
-    }
-
-    private static string MapCheckrLocationLambdaExpressionFromProperty(string property) => $"x.{property}";
-
-    private static string CSharpOperatorFromOperator(string @operator) => @operator.ToLowerInvariant() switch
-    {
-        "eq" => "==",
-        "neq" => "!=",
-        "lt" => "<",
-        "lte" => "<=",
-        "gt" => ">",
-        "gte" => ">=",
-        "and" => "&&",
-        "or" => "||",
-        "+" => "+",
-        "-" => "-",
-        "/" => "/",
-        "*" => "*",
-        "modulo" => "%",
-        _ => throw new ArgumentOutOfRangeException(nameof(@operator), $"operator {@operator} not implemented.")
-    };
+    public static IEnumerable<string?> ValidOperators() => _validOperators;
 
     private static IEnumerable<Loc> FilterByProximity(
         IEnumerable<Loc> locations,
         ProximityFilter proximityFilter,
-        Dictionary<string, List<ILatLng>> proximityLocationBuckets)
+        Dictionary<ulong, List<ILatLng>> proximityLocationBuckets)
     {
         var precision = proximityFilter.HashPrecisionFromProximityFilter()!.Value;
-        var proximityFilterRadius = proximityFilter.Radius;
+        var proximityFilterRadiusSquared = (double)proximityFilter.Radius * proximityFilter.Radius;
         return locations.Where(l =>
         {
             var hash = Hasher.Encode(l.Lat, l.Lng, precision);
-            return proximityLocationBuckets.TryGetValue(hash, out var p) && p.Any(x => Extensions.ApproximateDistance(l.Lat, l.Lng, x.Lat, x.Lng) < proximityFilterRadius);
+            return LocationLookupService.GetNearbyLocations(proximityLocationBuckets, hash).Any(x => Extensions.PointsAreCloserThan(l.Lat, l.Lng, x.Lat, x.Lng, proximityFilterRadiusSquared));
         });
     }
 
     private static IEnumerable<Loc> FilterByGeometries(IEnumerable<Loc> locations, (GeometryFilter filter, Geometry[] geometries)[] geometryFilters)
     {
         var combinationMode = geometryFilters.First().filter.CombinationMode;
+        var preparedFilters = geometryFilters
+            .Select(gf => (gf.filter, geometries: gf.geometries.Select(PreparedGeometryFactory.Prepare).ToArray()))
+            .ToArray();
+        var globalEnvelope = new Envelope();
+        foreach (var gf in geometryFilters)
+            foreach (var g in gf.geometries)
+                globalEnvelope.ExpandToInclude(g.EnvelopeInternal);
+
         return combinationMode switch
         {
             "union" => locations
                 .Where(l =>
                 {
+                    if (!globalEnvelope.Covers(l.Lng, l.Lat))
+                    {
+                        return preparedFilters.Any(gf => !gf.filter.LocationsInside);
+                    }
+
                     var point = new Point(l.Lng, l.Lat);
-                    return geometryFilters
+                    return preparedFilters
                         .Any(gf => gf.geometries
                             .Any(g => g.Covers(point)) == gf.filter.LocationsInside);
                 }),
             "intersection" => locations
                 .Where(l =>
                 {
+                    if (!globalEnvelope.Covers(l.Lng, l.Lat))
+                    {
+                        return preparedFilters.All(gf => !gf.filter.LocationsInside);
+                    }
+
                     var point = new Point(l.Lng, l.Lat);
-                    return geometryFilters
+                    return preparedFilters
                         .All(gf => gf.geometries
                             .Any(g => g.Covers(point)) == gf.filter.LocationsInside);
                 }),

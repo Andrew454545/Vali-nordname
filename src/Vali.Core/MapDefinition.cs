@@ -1,4 +1,5 @@
-using System.Text.Json.Serialization;
+﻿using System.Text.Json.Serialization;
+using NetTopologySuite.Geometries;
 
 namespace Vali.Core;
 
@@ -29,7 +30,7 @@ public record MapDefinition
     public bool EnableDefaultLocationFilters { get; set; }
     /// <summary>
     /// When true, locations with a road/street name in Google panorama metadata are rejected.
-    /// Uses the same approach as VirtualStreets/various-map-generator (GetMetadata + road path).
+    /// Uses the same GetMetadata road field used by Various Map Generator.
     /// </summary>
     public bool RejectRoadName { get; set; }
     public LocationProbability GlobalLocationProbability { get; set; } = new();
@@ -62,6 +63,8 @@ public record GeometryFilter
     [JsonIgnore]
     public bool LocationsInside => InclusionMode != "exclude";
     public string CombinationMode { get; init; } = "";
+    [JsonIgnore]
+    public Geometry[]? PreloadedGeometries { get; init; }
 }
 
 public record LiveGenerateMapDefinition
